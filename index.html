@@ -723,10 +723,15 @@
 </footer>
 
 <script>
-// ===== JSONBIN CONFIG =====
-const JSONBIN_ID  = '6a16ee42f47d5c455c3d00ea';
-const JSONBIN_KEY = 'sk_live_NXIG5vI753wgALXVDHQS61pR';
-const JSONBIN_URL = `https://api.jsonbin.io/v3/b/${JSONBIN_ID}`;
+// ===== AIRTABLE CONFIG =====
+const AIRTABLE_TOKEN = 'patRK8USNYUqois24.b79ac920cbbc87aa3469a18a8977c1f092ee1eebe526d07efe50befed2e3b9d4';
+const AIRTABLE_BASE  = 'apps5HBOghuQbQecF';
+const AIRTABLE_TABLE = 'tblsMsOsk6u8TRHEU';
+const AIRTABLE_API   = `https://api.airtable.com/v0/${AIRTABLE_BASE}/${AIRTABLE_TABLE}`;
+const AT_HEADERS     = {
+  'Authorization': `Bearer ${AIRTABLE_TOKEN}`,
+  'Content-Type': 'application/json'
+};
 
 // ===== STATE =====
 let products = [];
@@ -735,17 +740,35 @@ let orderCount = parseInt(localStorage.getItem('boutique_orders') || '0');
 let shopSettings = JSON.parse(localStorage.getItem('boutique_settings') || '{}');
 let currentImageBase64 = null;
 
-// ===== JSONBIN HELPERS =====
+// ===== AIRTABLE HELPERS =====
+// Convertir un enregistrement Airtable en produit
+function atToProduct(record) {
+  const f = record.fields;
+  return {
+    id: record.id,
+    name: f.name || f.Name || '',
+    category: f.category || f.Category || '',
+    price: f.price || f.Price || 0,
+    description: f.description || f.Description || '',
+    emoji: f.emoji || f.Emoji || '📦',
+    image: f.image ? f.image[0].url : (f.Image ? f.Image[0].url : null)
+  };
+}
+
 async function loadProductsFromDB() {
   try {
-    const res = await fetch(JSONBIN_URL + '/latest', {
-      headers: { 'X-Master-Key': JSONBIN_KEY }
-    });
+    const res = await fetch(AIRTABLE_API + '?pageSize=100', { headers: AT_HEADERS });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error?.message || 'HTTP ' + res.status);
+    }
     const data = await res.json();
-    products = Array.isArray(data.record) ? data.record : [];
+    products = (data.records || []).map(atToProduct);
+    showToast(`✅ ${products.length} produit(s) chargé(s)`, 'success');
   } catch(e) {
     products = [];
-    showToast('Erreur chargement produits');
+    showToast('❌ Erreur chargement : ' + e.message);
+    console.error('loadProductsFromDB error:', e);
   }
   renderProducts();
   renderAdminList();
@@ -753,14 +776,23 @@ async function loadProductsFromDB() {
 }
 
 async function saveProductsToDB() {
-  await fetch(JSONBIN_URL, {
-    method: 'PUT',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Master-Key': JSONBIN_KEY
-    },
-    body: JSON.stringify(products)
-  });
+  // Pas utilisé — Airtable utilise insert/delete individuels
+}
+
+function compressImage(base64) {
+  try {
+    const MAX = 300;
+    const canvas = document.createElement('canvas');
+    const img = new Image();
+    img.src = base64;
+    const ratio = Math.min(MAX / img.width, MAX / img.height, 1);
+    canvas.width = Math.round(img.width * ratio);
+    canvas.height = Math.round(img.height * ratio);
+    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.7);
+  } catch(e) {
+    return null;
+  }
 }
 
 // ===== INIT =====
@@ -875,20 +907,32 @@ async function addProduct() {
 
   if (!name || !price) { showToast('Nom et prix obligatoires !'); return; }
 
-  const product = {
-    id: Date.now().toString(),
-    name, category, price, description: desc,
-    emoji: emoji || '📦',
-    image: currentImageBase64 || null
-  };
+  const fields = { name, category, price, description: desc, emoji: emoji || '📦' };
 
-  products.push(product);
-  await saveProductsToDB();
+  // Airtable ne supporte pas base64 — on ignore l'image pour l'instant
+  // Les images peuvent être ajoutées directement dans Airtable
+
+  try {
+    const res = await fetch(AIRTABLE_API, {
+      method: 'POST',
+      headers: AT_HEADERS,
+      body: JSON.stringify({ fields })
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error?.message || 'HTTP ' + res.status);
+    }
+    const record = await res.json();
+    products.push(atToProduct(record));
+  } catch(e) {
+    showToast('❌ Erreur ajout : ' + e.message);
+    return;
+  }
+
   renderProducts();
   renderAdminList();
   updateStats();
 
-  // Reset form
   document.getElementById('newName').value = '';
   document.getElementById('newCategory').value = '';
   document.getElementById('newPrice').value = '';
@@ -897,17 +941,25 @@ async function addProduct() {
   document.getElementById('imgPreview').innerHTML = '<div class="placeholder"><span class="icon">📷</span>Cliquez pour ajouter une photo</div>';
   currentImageBase64 = null;
 
-  showToast('Produit ajouté avec succès !', 'success');
+  showToast('✅ Produit ajouté avec succès !', 'success');
 }
 
 async function deleteProduct(id) {
   if (!confirm('Supprimer ce produit ?')) return;
-  products = products.filter(p => p.id !== id);
-  await saveProductsToDB();
-  renderProducts();
-  renderAdminList();
-  updateStats();
-  showToast('Produit supprimé.');
+  try {
+    const res = await fetch(`${AIRTABLE_API}/${id}`, {
+      method: 'DELETE',
+      headers: AT_HEADERS
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    products = products.filter(p => p.id !== id);
+    renderProducts();
+    renderAdminList();
+    updateStats();
+    showToast('Produit supprimé.');
+  } catch(e) {
+    showToast('❌ Erreur suppression : ' + e.message);
+  }
 }
 
 function saveProducts() {
